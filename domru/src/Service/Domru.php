@@ -9,6 +9,7 @@ use Psr\Log\LoggerInterface;
 use React\Http\Browser;
 use React\Http\Message\ResponseException;
 use React\Promise\PromiseInterface;
+
 use function React\Promise\all;
 use function React\Promise\reject;
 use function React\Promise\resolve;
@@ -19,55 +20,43 @@ class Domru
     use LoggerAwareTrait;
 
     private Cache $cache;
-
     private AccountService $accountService;
-
     private Browser $client;
-
     private ?AsyncRegistry $registry = null;
 
-    private ?string $asyncUserAgent = 'iPhone13,3 | iOS 14.7.1 | erth | 6.9.3 (build 3) | _ | %s | %s';
+    /**
+     * Modern Android myHome/Dom.ru User-Agent format.
+     * Format arguments: operatorId, uuid, placeId.
+     */
+    private ?string $asyncUserAgent = 'Google sdkgphone64x8664 | Android 14 | erth | 8.26.0 (82600010) | | %d | %s | %d';
+
+    public const API_HOST = 'myhome.proptech.ru';
 
     public const LOGIN_BY_PHONE = 'phone';
-
     public const LOGIN_BY_ACCOUNT = 'account';
 
-    public const API_AUTH_LOGIN = 'https://api-mh.ertelecom.ru/auth/v2/login/%s';
+    public const API_AUTH_LOGIN = 'https://myhome.proptech.ru/auth/v2/login/%s';
+    public const API_AUTH_CONFIRMATION = 'https://myhome.proptech.ru/auth/v2/confirmation/%s';
+    public const API_AUTH_CONFIRMATION_SMS = 'https://myhome.proptech.ru/auth/v2/auth/%s/confirmation';
+    public const API_USER_AGENT = 'Google sdkgphone64x8664 | Android 14 | erth | 8.26.0 (82600010) | | 0 | 00000000-0000-0000-0000-000000000000 | 1';
 
-    public const API_AUTH_CONFIRMATION = 'https://api-mh.ertelecom.ru/auth/v2/confirmation/%s';
+    public const API_REFRESH_SESSION = 'https://myhome.proptech.ru/auth/v2/session/refresh';
 
-    public const API_AUTH_CONFIRMATION_SMS = 'https://api-mh.ertelecom.ru/auth/v2/auth/%s/confirmation';
+    public const API_PROFILES = 'https://myhome.proptech.ru/rest/v1/subscribers/profiles';
+    public const API_FINANCES = 'https://myhome.proptech.ru/rest/v1/subscribers/profiles/finances';
+    public const API_CAMERAS = 'https://myhome.proptech.ru/rest/v1/forpost/cameras';
+    public const API_SUBSCRIBER_PLACES = 'https://myhome.proptech.ru/rest/v1/subscriberplaces';
 
-    public const API_USER_AGENT = 'myHomeErth/3 CFNetwork/1240.0.4 Darwin/20.6.0';
-
-    public const API_REFRESH_SESSION = 'https://api-mh.ertelecom.ru/auth/v2/session/refresh';
-
-    public const API_PROFILES = 'https://api-mh.ertelecom.ru/rest/v1/subscribers/profiles';
-
-    public const API_FINANCES = 'https://api-mh.ertelecom.ru/rest/v1/subscribers/profiles/finances';
-
-    public const API_CAMERAS = 'https://api-mh.ertelecom.ru/rest/v1/forpost/cameras';
-
-    public const API_SUBSCRIBER_PLACES = 'https://api-mh.ertelecom.ru/rest/v1/subscriberplaces';
-
-    public const API_OPEN_DOOR = 'https://api-mh.ertelecom.ru/rest/v1/places/%d/accesscontrols/%d/actions';
-
-    public const API_CAMERA_GET_STREAM = 'https://api-mh.ertelecom.ru/rest/v1/forpost/cameras/%d/video?';
-
-    public const API_CAMERA_GET_SNAPSHOT = 'https://api-mh.ertelecom.ru/rest/v1/forpost/cameras/%d/snapshots?';
-
-    public const API_EVENTS = 'https://api-mh.ertelecom.ru/rest/v1/places/%d/events?allowExtentedActions=true';
+    public const API_OPEN_DOOR = 'https://myhome.proptech.ru/rest/v1/places/%d/accesscontrols/%d/actions';
+    public const API_CAMERA_GET_STREAM = 'https://myhome.proptech.ru/rest/v1/forpost/cameras/%d/video?';
+    public const API_CAMERA_GET_SNAPSHOT = 'https://myhome.proptech.ru/rest/v1/forpost/cameras/%d/snapshots?';
+    public const API_EVENTS = 'https://myhome.proptech.ru/rest/v1/places/%d/events?allowExtentedActions=true';
 
     public const REFRESH_ACCESS_TOKEN_INTERVAL = 60;
-
     public const REFRESH_FINANCES_INTERVAL = 3600;
-
     public const REFRESH_PROFILES_INTERVAL = 3600;
-
     public const REFRESH_SUBSCRIBER_PLACES_INTERVAL = 3600;
-
     public const REFRESH_CAMERAS_INTERVAL = 3600;
-
     public const REFRESH_EVENTS_INTERVAL = 300;
 
     public function __construct(LoggerInterface $logger, Cache $cache, AccountService $accountService)
@@ -78,49 +67,87 @@ class Domru
         $this->accountService = $accountService;
     }
 
+    private function apiUserAgent($operatorId = 0, $uuid = null, $placeId = 1): string
+    {
+        if (!$uuid) {
+            $uuid = '00000000-0000-0000-0000-000000000000';
+        }
+
+        if (!$placeId) {
+            $placeId = 1;
+        }
+
+        return sprintf($this->asyncUserAgent, (int)$operatorId, $uuid, (int)$placeId);
+    }
+
+    private function commonHeaders($operatorId = 0, $uuid = null, $placeId = 1, array $extra = []): array
+    {
+        return array_merge(
+            [
+                'Host' => self::API_HOST,
+                'Content-Type' => 'application/json; charset=UTF-8',
+                'Connection' => 'keep-alive',
+                'Accept' => '*/*',
+                'User-Agent' => $this->apiUserAgent($operatorId, $uuid, $placeId),
+                'Accept-Language' => 'en-us',
+                'Accept-Encoding' => 'gzip, deflate, br',
+            ],
+            $extra
+        );
+    }
+
     private function apiError(string $account, \Exception $e)
     {
-        try {
-            $error = '['.$account.'] Api error: ['.$e->getMessage().'] Contents: '.$e->getResponse()->getBody()->getContents();
-            $this->logger->error($error);
+        $content = '';
 
-            return reject($error);
-        } catch (\Throwable $e) {
-            dd($e);
+        if ($e instanceof ResponseException) {
+            try {
+                $content = $e->getResponse()->getBody()->getContents();
+            } catch (\Throwable $ignored) {
+                $content = '';
+            }
         }
+
+        $error = '['.$account.'] Api error: ['.$e->getMessage().']';
+        if ($content !== '') {
+            $error .= ' Contents: '.$content;
+        }
+
+        $this->logger->error($error);
+
+        return reject($error);
     }
 
     public function getAccounts(string $phone, string $loginType): ?array
     {
         $data = $this->cache->get('accounts');
+
         if (!$data) {
             $response = $this->getHttp()->request(
                 'GET',
                 sprintf(self::API_AUTH_LOGIN, $phone),
                 [
-                    'headers' => [
-                        'User-Agent' => self::API_USER_AGENT,
-                    ],
+                    'headers' => $this->commonHeaders(0, null, 1, ['Authorization' => '']),
                 ]
             );
-            $content = $response->getBody()->getContents();
 
+            $content = $response->getBody()->getContents();
             $this->logger->debug(__METHOD__.' | Headers', $response->getHeaders());
             $this->logger->debug(__METHOD__.' | Content', [$content]);
 
             if ($loginType === self::LOGIN_BY_PHONE) {
                 $accounts = json_decode($content, true);
             } else {
-                /**
-                 * @TODO Auth by account id + pass
-                 */
+                /** @TODO Auth by account id + pass */
                 $accounts = null;
             }
+
             if ($accounts) {
                 $data = [
-                    'phone'    => $phone,
+                    'phone' => $phone,
                     'accounts' => $accounts,
                 ];
+
                 $this->cache->set('accounts', $data, 600);
             }
         }
@@ -131,31 +158,32 @@ class Domru
     public function requestSmsConfirmation(string $phone, int $index): bool
     {
         $accounts = $this->getAccounts($phone, Domru::LOGIN_BY_PHONE);
-        $headers = [
-            'Host'            => parse_url(self::API_AUTH_CONFIRMATION, PHP_URL_HOST),
-            'Content-Type'    => 'application/json',
-            'User-Agent'      => self::API_USER_AGENT,
-            'Connection'      => 'keep-alive',
-            'Accept'          => '*/*',
-            'Accept-Language' => 'en-us',
-            'Accept-Encoding' => 'gzip, deflate, br',
-            'Authorization'   => '',
-        ];
+        $address = $accounts['accounts'][$index];
+
+        $headers = $this->commonHeaders(
+            $address['operatorId'] ?? 0,
+            null,
+            $address['placeId'] ?? 1,
+            ['Authorization' => '']
+        );
+
         $data = [
-            'accountId'    => $accounts['accounts'][$index]['accountId'],
-            'address'      => $accounts['accounts'][$index]['address'],
-            'operatorId'   => $accounts['accounts'][$index]['operatorId'],
-            'placeId'      => $accounts['accounts'][$index]['placeId'],
-            'subscriberId' => $accounts['accounts'][$index]['subscriberId'],
+            'accountId' => $address['accountId'],
+            'address' => $address['address'],
+            'operatorId' => (int)$address['operatorId'],
+            'placeId' => (int)$address['placeId'],
+            'subscriberId' => $address['subscriberId'],
+            'profileId' => $address['profileId'] ?? '',
         ];
 
         $this->logger->debug(__METHOD__.' | Send', ['headers' => $headers, 'data' => $data]);
+
         $response = $this->getHttp()->request(
             'POST',
             sprintf(self::API_AUTH_CONFIRMATION, $phone),
             [
                 'headers' => $headers,
-                'body'    => json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT),
+                'body' => json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT),
             ]
         );
 
@@ -170,31 +198,31 @@ class Domru
     {
         $accounts = $this->getAccounts($phone, Domru::LOGIN_BY_PHONE);
         $address = $accounts['accounts'][$index];
-        $headers = [
-            'Host'            => parse_url(self::API_AUTH_CONFIRMATION_SMS, PHP_URL_HOST),
-            'Content-Type'    => 'application/json',
-            'User-Agent'      => self::API_USER_AGENT,
-            'Connection'      => 'keep-alive',
-            'Accept'          => '*/*',
-            'Accept-Language' => 'en-us',
-            'Accept-Encoding' => 'gzip, deflate, br',
-            'Authorization'   => '',
-        ];
+
+        $headers = $this->commonHeaders(
+            $address['operatorId'] ?? 0,
+            null,
+            $address['placeId'] ?? 1,
+            ['Authorization' => '']
+        );
+
         $data = [
-            'accountId'    => $address['accountId'],
-            'confirm1'     => (string)$code,
-            'login'        => $phone,
-            'operatorId'   => (int)$address['operatorId'],
+            'accountId' => $address['accountId'],
+            'confirm1' => (string)$code,
+            'login' => $phone,
+            'operatorId' => (int)$address['operatorId'],
             'subscriberId' => $address['subscriberId'],
+            'profileId' => $address['profileId'] ?? '',
         ];
 
         $this->logger->debug(__METHOD__.' | Send', ['headers' => $headers, 'data' => $data]);
+
         $response = $this->getHttp()->request(
             'POST',
             sprintf(self::API_AUTH_CONFIRMATION_SMS, $phone),
             [
                 'headers' => $headers,
-                'body'    => json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT),
+                'body' => json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT),
             ]
         );
 
@@ -211,24 +239,23 @@ class Domru
     {
         $this->client = new Browser($this->registry->loop);
 
-        /**
-         * Accounts cache
-         */
+        /** Accounts cache */
         $this->registry->loop->addPeriodicTimer(
             5,
             function () {
                 $savedAccounts = array_keys($this->registry->accounts);
                 $this->registry->accounts = $this->accountService->getAccounts();
-                $newAcounts = array_diff(array_keys($this->registry->accounts), $savedAccounts);
+                $newAccounts = array_diff(array_keys($this->registry->accounts), $savedAccounts);
                 $deletedAccounts = array_diff($savedAccounts, array_keys($this->registry->accounts));
 
                 $this->registry->accountsUpdate($deletedAccounts);
-                if ($newAcounts) {
+
+                if ($newAccounts) {
                     $this->refreshTokens()
                         ->then(
-                            function () use ($newAcounts) {
+                            function () use ($newAccounts) {
                                 $promises = [];
-                                foreach ($newAcounts as $account) {
+                                foreach ($newAccounts as $account) {
                                     $promises[] = $this->fetchData(self::API_SUBSCRIBER_PLACES, 'subscriberPlaces', $account);
                                     $promises[] = $this->fetchData(self::API_FINANCES, 'finances', $account);
                                     $promises[] = $this->fetchData(self::API_PROFILES, 'profiles', $account);
@@ -302,25 +329,35 @@ class Domru
             ),
         ];
 
-        return all($promises)
-            ->then(fn() => $this->registry->state = AsyncRegistry::STATE_LOOP);
+        return all($promises)->then(fn() => $this->registry->state = AsyncRegistry::STATE_LOOP);
     }
 
     private function refreshTokens(): PromiseInterface
     {
         $promises = [];
+
         foreach ($this->registry->accounts as $account => $accountData) {
+            $operatorId = $accountData['data']['operatorId'] ?? ($accountData['address']['operatorId'] ?? 0);
+            $uuid = $accountData['uuid'] ?? null;
+            $placeId = $accountData['address']['placeId'] ?? 1;
+            $refreshToken = $accountData['data']['refreshToken'] ?? null;
+
             $promises[$account] = $this->client->get(
                 self::API_REFRESH_SESSION,
-                [
-                    'User-Agent' => sprintf($this->asyncUserAgent, $accountData['data']['operatorId'], $accountData['uuid']),
-                    'Operator'   => $accountData['data']['operatorId'],
-                    'Bearer'     => $accountData['data']['refreshToken'],
-                ]
+                $this->commonHeaders(
+                    $operatorId,
+                    $uuid,
+                    $placeId,
+                    [
+                        'Operator' => (string)$operatorId,
+                        'Bearer' => $refreshToken,
+                    ]
+                )
             )
                 ->then(
-                    function (ResponseInterface $response) use ($account, $accountData) {
+                    function (ResponseInterface $response) use ($account) {
                         $data = json_decode($response->getBody()->getContents(), true);
+
                         if (!is_array($data) || empty($data['accessToken'])) {
                             return reject('Api error ['.$account.']: [HTTP OK] Response json failed');
                         }
@@ -363,19 +400,25 @@ class Domru
 
         foreach ($tokensForFetch as $account => $token) {
             $this->logger->debug('['.$account.'] Trying to fetch: '.$storageKey);
+
+            $operatorId = $this->registry->accounts[$account]['data']['operatorId']
+                ?? ($this->registry->accounts[$account]['address']['operatorId'] ?? 0);
+            $uuid = $this->registry->accounts[$account]['uuid'] ?? null;
+            $placeId = $this->registry->accounts[$account]['address']['placeId'] ?? 1;
+
             $promises[$account] = $this->client->get(
                 $apiUrl,
-                [
-                    'Operator'      => $this->registry->accounts[$account]['data']['operatorId'],
-                    'User-Agent'    => sprintf(
-                        $this->asyncUserAgent,
-                        $this->registry->accounts['data']['operatorId'],
-                        $this->registry->accounts[$account]['uuid']
-                    ),
-                    'Authorization' => 'Bearer '.$token,
-                ]
+                $this->commonHeaders(
+                    $operatorId,
+                    $uuid,
+                    $placeId,
+                    [
+                        'Operator' => (string)$operatorId,
+                        'Authorization' => 'Bearer '.$token,
+                    ]
+                )
             )->then(
-                function (ResponseInterface $response) use ($account, $storageKey, $apiUrl) {
+                function (ResponseInterface $response) use ($account, $storageKey) {
                     $data = json_decode($response->getBody()->getContents(), true);
                     $this->logger->debug('['.$account.'] Fetching success: '.$storageKey);
 
@@ -409,6 +452,7 @@ class Domru
         $all = $this->registry->all();
         $accountData = $all['accounts'][$account];
         $subscriberPlaces = $accountData['subscriberPlaces'] ?? null;
+
         if (!is_array($subscriberPlaces)) {
             return reject('Subscriber places is empty');
         }
@@ -432,9 +476,9 @@ class Domru
 
         return resolve(
             [
-                'placeId'         => $placeId,
+                'placeId' => $placeId,
                 'accessControlId' => $accessControlId,
-                'accessControl'   => $useAccessControl,
+                'accessControl' => $useAccessControl,
             ]
         );
     }
@@ -442,6 +486,7 @@ class Domru
     private function getPlaceId(string $account, int $placeId = null): PromiseInterface
     {
         $subscriberPlaces = $this->registry->fetch('subscriberPlaces', $account);
+
         if (!is_array($subscriberPlaces)) {
             return reject('Subscriber places is empty');
         }
@@ -453,11 +498,11 @@ class Domru
                 $placeId = $subscriberPlace['place']['id'];
                 $place = $subscriberPlace['place'];
                 break;
-            } else {
-                if ($placeId === $subscriberPlace['place']['id']) {
-                    $place = $subscriberPlace['place'];
-                    break;
-                }
+            }
+
+            if ($placeId === $subscriberPlace['place']['id']) {
+                $place = $subscriberPlace['place'];
+                break;
             }
         }
 
@@ -468,7 +513,7 @@ class Domru
         return resolve(
             [
                 'placeId' => $placeId,
-                'place'   => $place,
+                'place' => $place,
             ]
         );
     }
@@ -491,25 +536,31 @@ class Domru
                         ['placeId' => $use['placeId'], 'accessControlId' => $use['accessControlId']]
                     );
 
+                    $operatorId = $this->registry->accounts[$account]['data']['operatorId']
+                        ?? ($this->registry->accounts[$account]['address']['operatorId'] ?? 0);
+                    $uuid = $this->registry->accounts[$account]['uuid'] ?? null;
+                    $placeId = $this->registry->accounts[$account]['address']['placeId'] ?? 1;
+
                     return $this->client->post(
                         sprintf(self::API_OPEN_DOOR, $use['placeId'], $use['accessControlId']),
-                        [
-                            'Operator'      => $this->registry->accounts[$account]['data']['operatorId'],
-                            'Content-Type'  => 'application/json',
-                            'User-Agent'    => sprintf(
-                                $this->asyncUserAgent,
-                                $this->registry->accounts['data']['operatorId'],
-                                $this->registry->accounts[$account]['uuid']
-                            ),
-                            'Authorization' => 'Bearer '.$this->registry->getToken($account),
-                        ],
+                        $this->commonHeaders(
+                            $operatorId,
+                            $uuid,
+                            $placeId,
+                            [
+                                'Operator' => (string)$operatorId,
+                                'Authorization' => 'Bearer '.$this->registry->getToken($account),
+                            ]
+                        ),
                         json_encode(['name' => 'accessControlOpen'])
                     )->then(
                         function (ResponseInterface $response) use ($account) {
                             $data = json_decode($response->getBody()->getContents(), true);
+
                             if (!is_array($data) || !isset($data['data']['status'])) {
                                 return reject('['.$account.'] Api error: [HTTP OK] Response json failed');
                             }
+
                             $this->logger->debug('Door opened');
 
                             return resolve($data['data']);
@@ -519,8 +570,8 @@ class Domru
 
                             return resolve(
                                 [
-                                    'status'       => false,
-                                    'errorCode'    => $e->getCode(),
+                                    'status' => false,
+                                    'errorCode' => $e->getCode(),
                                     'errorMessage' => $e->getMessage(),
                                 ]
                             );
@@ -545,30 +596,33 @@ class Domru
             return reject('There is no available camera for streaming');
         }
 
-        $cameraToUse = null;
         foreach ($cameras as $camera) {
             if ($cameraId && (int)$camera['ID'] === $cameraId) {
-                // Необходимая камера
                 break;
             }
+
             if ($cameraId === null) {
                 $cameraId = (int)$camera['ID'];
                 break;
             }
         }
 
+        $operatorId = $this->registry->accounts[$account]['data']['operatorId']
+            ?? ($this->registry->accounts[$account]['address']['operatorId'] ?? 0);
+        $uuid = $this->registry->accounts[$account]['uuid'] ?? null;
+        $placeId = $this->registry->accounts[$account]['address']['placeId'] ?? 1;
+
         return $this->client->get(
             sprintf(self::API_CAMERA_GET_SNAPSHOT, $cameraId),
-            [
-                'Operator'      => $this->registry->accounts[$account]['data']['operatorId'],
-                'Content-Type'  => 'application/json',
-                'User-Agent'    => sprintf(
-                    $this->asyncUserAgent,
-                    $this->registry->accounts['data']['operatorId'],
-                    $this->registry->accounts[$account]['uuid']
-                ),
-                'Authorization' => 'Bearer '.$this->registry->getToken($account),
-            ]
+            $this->commonHeaders(
+                $operatorId,
+                $uuid,
+                $placeId,
+                [
+                    'Operator' => (string)$operatorId,
+                    'Authorization' => 'Bearer '.$this->registry->getToken($account),
+                ]
+            )
         )->then(
             function (ResponseInterface $response) use ($account) {
                 if ($response->getHeader('Content-Type')[0] !== 'image/jpeg') {
@@ -579,7 +633,7 @@ class Domru
 
                 return resolve(
                     [
-                        'mime'    => 'image/jpeg',
+                        'mime' => 'image/jpeg',
                         'content' => $response->getBody()->getContents(),
                     ]
                 );
@@ -589,8 +643,8 @@ class Domru
 
                 return resolve(
                     [
-                        'status'       => false,
-                        'errorCode'    => $e->getCode(),
+                        'status' => false,
+                        'errorCode' => $e->getCode(),
                         'errorMessage' => $e->getMessage(),
                     ]
                 );
@@ -611,12 +665,13 @@ class Domru
         }
 
         $cameraToUse = null;
+
         foreach ($cameras as $camera) {
             if ($cameraId && (int)$camera['ID'] === $cameraId) {
-                // Необходимая камера
                 $cameraToUse = $camera;
                 break;
             }
+
             if ($cameraId === null) {
                 $cameraId = (int)$camera['ID'];
                 $cameraToUse = $camera;
@@ -628,22 +683,28 @@ class Domru
         $httpQuery = [
             'LightStream' => 0,
         ];
+
         if ($timestamp) {
             $httpQuery['TS'] = $timestamp;
             $httpQuery['TZ'] = $cameraToUse['TimeZone'];
         }
 
+        $operatorId = $this->registry->accounts[$account]['data']['operatorId']
+            ?? ($this->registry->accounts[$account]['address']['operatorId'] ?? 0);
+        $uuid = $this->registry->accounts[$account]['uuid'] ?? null;
+        $placeId = $this->registry->accounts[$account]['address']['placeId'] ?? 1;
+
         return $this->client->get(
             $url.http_build_query($httpQuery),
-            [
-                'Operator'      => $this->registry->accounts[$account]['data']['operatorId'],
-                'User-Agent'    => sprintf(
-                    $this->asyncUserAgent,
-                    $this->registry->accounts['data']['operatorId'],
-                    $this->registry->accounts[$account]['uuid']
-                ),
-                'Authorization' => 'Bearer '.$this->registry->getToken($account),
-            ]
+            $this->commonHeaders(
+                $operatorId,
+                $uuid,
+                $placeId,
+                [
+                    'Operator' => (string)$operatorId,
+                    'Authorization' => 'Bearer '.$this->registry->getToken($account),
+                ]
+            )
         )->then(
             function (ResponseInterface $response) {
                 $data = json_decode($response->getBody()->getContents(), true);
@@ -659,8 +720,8 @@ class Domru
 
                 return resolve(
                     [
-                        'status'       => false,
-                        'errorCode'    => $e->getCode(),
+                        'status' => false,
+                        'errorCode' => $e->getCode(),
                         'errorMessage' => $e->getMessage(),
                     ]
                 );
@@ -677,29 +738,31 @@ class Domru
         return $this->getPlaceId($account, $placeId)
             ->then(
                 function ($use) use ($account, $limit) {
-                    $this->logger->debug(
-                        'Trying to fetch events for place',
-                        ['placeId' => $use['placeId']]
-                    );
+                    $this->logger->debug('Trying to fetch events for place', ['placeId' => $use['placeId']]);
+
+                    $operatorId = $this->registry->accounts[$account]['data']['operatorId']
+                        ?? ($this->registry->accounts[$account]['address']['operatorId'] ?? 0);
+                    $uuid = $this->registry->accounts[$account]['uuid'] ?? null;
+                    $accountPlaceId = $this->registry->accounts[$account]['address']['placeId'] ?? 1;
 
                     return $this->client->get(
                         sprintf(self::API_EVENTS, $use['placeId']),
-                        [
-                            'Operator'      => $this->registry->accounts[$account]['data']['operatorId'],
-                            'Content-Type'  => 'application/json',
-                            'User-Agent'    => sprintf(
-                                $this->asyncUserAgent,
-                                $this->registry->accounts['data']['operatorId'],
-                                $this->registry->accounts[$account]['uuid']
-                            ),
-                            'Authorization' => 'Bearer '.$this->registry->getToken($account),
-                        ]
+                        $this->commonHeaders(
+                            $operatorId,
+                            $uuid,
+                            $accountPlaceId,
+                            [
+                                'Operator' => (string)$operatorId,
+                                'Authorization' => 'Bearer '.$this->registry->getToken($account),
+                            ]
+                        )
                     )->then(
                         function (ResponseInterface $response) use ($account, $limit) {
                             $data = json_decode($response->getBody()->getContents(), true);
+
                             if (!is_array($data) || !isset($data['data'])) {
                                 return reject('['.$account.'] Api error: [HTTP OK] Response json failed');
-                            };
+                            }
 
                             if ($limit) {
                                 $returnData = [];
@@ -707,22 +770,21 @@ class Domru
                                     if ($i >= $limit) {
                                         break;
                                     }
-
                                     $returnData[] = $row;
                                 }
 
                                 return resolve($returnData);
-                            } else {
-                                return resolve($data['data']);
                             }
+
+                            return resolve($data['data']);
                         },
                         function (ResponseException $e) use ($account) {
                             $this->apiError($account, $e);
 
                             return resolve(
                                 [
-                                    'status'       => false,
-                                    'errorCode'    => $e->getCode(),
+                                    'status' => false,
+                                    'errorCode' => $e->getCode(),
                                     'errorMessage' => $e->getMessage(),
                                 ]
                             );
