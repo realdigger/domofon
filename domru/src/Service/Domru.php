@@ -286,6 +286,15 @@ class Domru
     {
         $this->registry = $registry;
         $this->registry->accounts = $this->accountService->getAccounts();
+
+        foreach ($this->registry->accounts as $account => $accountData) {
+            $accessToken = $accountData['data']['accessToken'] ?? null;
+
+            if ($accessToken) {
+                $this->registry->setToken($account, $accessToken);
+                $this->logger->debug('['.$account.'] Initial access token loaded from storage');
+            }
+        }
     }
 
     private function watchdog()
@@ -356,18 +365,55 @@ class Domru
             )
                 ->then(
                     function (ResponseInterface $response) use ($account) {
-                        $data = json_decode($response->getBody()->getContents(), true);
+                        $content = $response->getBody()->getContents();
+                        $data = json_decode($content, true);
 
-                        if (!is_array($data) || empty($data['accessToken'])) {
-                            return reject('Api error ['.$account.']: [HTTP OK] Response json failed');
+                        if (isset($data['data']) && is_array($data['data'])) {
+                            $data = $data['data'];
                         }
 
-                        $this->logger->debug('['.$account.'] Access token refresh success');
+                        if (is_array($data) && !empty($data['accessToken'])) {
+                            $this->logger->debug('['.$account.'] Access token refresh success');
 
-                        return resolve($data['accessToken']);
+                            if (!empty($data['refreshToken'])) {
+                                $this->registry->accounts[$account]['data']['refreshToken'] = $data['refreshToken'];
+                            }
+
+                            return resolve($data['accessToken']);
+                        }
+
+                        $fallbackToken = $this->registry->accounts[$account]['data']['accessToken'] ?? null;
+
+                        if ($fallbackToken) {
+                            $this->logger->warning('['.$account.'] Access token refresh failed, fallback to stored access token', [
+                                'content' => $content,
+                            ]);
+
+                            return resolve($fallbackToken);
+                        }
+
+                        $this->logger->error('['.$account.'] Access token refresh failed and fallback token is empty', [
+                            'content' => $content,
+                        ]);
+
+                        return resolve(false);
                     },
-                    function (ResponseException $e) use ($account) {
-                        $this->apiError($account, $e);
+                    function ($e) use ($account) {
+                        if ($e instanceof ResponseException) {
+                            $this->apiError($account, $e);
+                        } elseif ($e instanceof \Throwable) {
+                            $this->logger->error('['.$account.'] Refresh request failed: '.$e->getMessage());
+                        } else {
+                            $this->logger->error('['.$account.'] Refresh request failed', ['error' => $e]);
+                        }
+
+                        $fallbackToken = $this->registry->accounts[$account]['data']['accessToken'] ?? null;
+
+                        if ($fallbackToken) {
+                            $this->logger->warning('['.$account.'] Refresh request failed, fallback to stored access token');
+
+                            return resolve($fallbackToken);
+                        }
 
                         return resolve(false);
                     }
