@@ -249,11 +249,17 @@ class Domru
                 $deletedAccounts = array_diff($savedAccounts, array_keys($this->registry->accounts));
 
                 $this->registry->accountsUpdate($deletedAccounts);
+                $this->loadStoredAccessTokens();
 
                 if ($newAccounts) {
+                    $this->logger->debug('New accounts detected, preparing API state', $newAccounts);
+                    $this->registry->state = AsyncRegistry::STATE_READY;
+
                     $this->refreshTokens()
                         ->then(
                             function () use ($newAccounts) {
+                                $this->loadStoredAccessTokens();
+
                                 $promises = [];
                                 foreach ($newAccounts as $account) {
                                     $promises[] = $this->fetchData(self::API_SUBSCRIBER_PLACES, 'subscriberPlaces', $account);
@@ -262,7 +268,21 @@ class Domru
                                     $promises[] = $this->fetchData(self::API_CAMERAS, 'cameras', $account);
                                 }
 
+                                if (!$promises) {
+                                    return resolve(null);
+                                }
+
                                 return all($promises);
+                            }
+                        )
+                        ->then(
+                            function () {
+                                $this->registry->state = AsyncRegistry::STATE_LOOP;
+                                $this->logger->debug('API state switched to LOOP after account update');
+                            },
+                            function ($error) {
+                                $this->registry->state = AsyncRegistry::STATE_LOOP;
+                                $this->logger->error('Account update fetch failed, API state forced to LOOP', ['error' => $error]);
                             }
                         );
                 }
@@ -272,11 +292,17 @@ class Domru
         $this->refreshTokens()
             ->then(
                 function () {
+                    $this->loadStoredAccessTokens();
                     $this->registry->state = AsyncRegistry::STATE_READY;
                     $this->registry->loop->addPeriodicTimer(
                         self::REFRESH_ACCESS_TOKEN_INTERVAL,
                         fn() => $this->refreshTokens()
                     );
+                },
+                function ($error) {
+                    $this->loadStoredAccessTokens();
+                    $this->registry->state = AsyncRegistry::STATE_READY;
+                    $this->logger->error('Initial token refresh failed, fallback to stored tokens', ['error' => $error]);
                 }
             )
             ->then(fn() => $this->watchdog());
@@ -286,13 +312,30 @@ class Domru
     {
         $this->registry = $registry;
         $this->registry->accounts = $this->accountService->getAccounts();
+        $this->loadStoredAccessTokens();
+    }
+
+    /**
+     * Load saved access tokens from /share/domru/accounts into the async registry.
+     * This is important after first SMS authorization: the long-running API process
+     * can start before accounts exist, then accounts appear later from the web login flow.
+     */
+    private function loadStoredAccessTokens(): void
+    {
+        if (!$this->registry || !is_array($this->registry->accounts)) {
+            return;
+        }
 
         foreach ($this->registry->accounts as $account => $accountData) {
             $accessToken = $accountData['data']['accessToken'] ?? null;
 
-            if ($accessToken) {
-                $this->registry->setToken($account, $accessToken);
-                $this->logger->debug('['.$account.'] Initial access token loaded from storage');
+            if (!$accessToken) {
+                continue;
+            }
+
+            if ($this->registry->getToken((string)$account) !== $accessToken) {
+                $this->registry->setToken((string)$account, $accessToken);
+                $this->logger->debug('['.$account.'] Access token loaded from storage');
             }
         }
     }
@@ -338,12 +381,27 @@ class Domru
             ),
         ];
 
-        return all($promises)->then(fn() => $this->registry->state = AsyncRegistry::STATE_LOOP);
+        return all($promises)->then(
+            function () {
+                $this->registry->state = AsyncRegistry::STATE_LOOP;
+                $this->logger->debug('Watchdog complete, API state switched to LOOP');
+            },
+            function ($error) {
+                $this->registry->state = AsyncRegistry::STATE_LOOP;
+                $this->logger->error('Watchdog failed, API state forced to LOOP', ['error' => $error]);
+            }
+        );
     }
 
     private function refreshTokens(): PromiseInterface
     {
         $promises = [];
+
+        $this->loadStoredAccessTokens();
+
+        if (!is_array($this->registry->accounts) || !$this->registry->accounts) {
+            return resolve(null);
+        }
 
         foreach ($this->registry->accounts as $account => $accountData) {
             $operatorId = $accountData['data']['operatorId'] ?? ($accountData['address']['operatorId'] ?? 0);
@@ -434,12 +492,27 @@ class Domru
     private function fetchData(string $apiUrl, string $storageKey, string $forcedAccount = null): PromiseInterface
     {
         $promises = [];
+        $this->loadStoredAccessTokens();
         $tokensForFetch = $this->registry->getTokens();
+
+        if ($forcedAccount && !isset($tokensForFetch[$forcedAccount])) {
+            $fallbackToken = $this->registry->accounts[$forcedAccount]['data']['accessToken'] ?? null;
+            if ($fallbackToken) {
+                $this->registry->setToken($forcedAccount, $fallbackToken);
+                $tokensForFetch[$forcedAccount] = $fallbackToken;
+                $this->logger->debug('['.$forcedAccount.'] Forced account token loaded from storage for '.$storageKey);
+            }
+        }
 
         if ($forcedAccount && isset($tokensForFetch[$forcedAccount])) {
             $tokensForFetch = [
                 $forcedAccount => $tokensForFetch[$forcedAccount],
             ];
+        }
+
+        if (!$tokensForFetch) {
+            $this->logger->warning('No tokens available for fetching '.$storageKey);
+            return resolve(null);
         }
 
         $this->logger->debug('Fetching '.$storageKey.' for accounts', array_keys($tokensForFetch));
@@ -465,8 +538,16 @@ class Domru
                 )
             )->then(
                 function (ResponseInterface $response) use ($account, $storageKey) {
-                    $data = json_decode($response->getBody()->getContents(), true);
+                    $content = $response->getBody()->getContents();
+                    $data = json_decode($content, true);
                     $this->logger->debug('['.$account.'] Fetching success: '.$storageKey);
+
+                    if (!is_array($data)) {
+                        $this->logger->warning('['.$account.'] Fetching '.$storageKey.' returned non-json response', [
+                            'content' => $content,
+                        ]);
+                        return resolve([]);
+                    }
 
                     return resolve($data);
                 },
