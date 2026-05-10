@@ -90,7 +90,7 @@ class Domru
                 'Accept' => '*/*',
                 'User-Agent' => $this->apiUserAgent($operatorId, $uuid, $placeId),
                 'Accept-Language' => 'en-us',
-                'Accept-Encoding' => 'gzip, deflate, br',
+                'Accept-Encoding' => 'identity',
             ],
             $extra
         );
@@ -406,7 +406,9 @@ class Domru
         foreach ($this->registry->accounts as $account => $accountData) {
             $operatorId = $accountData['data']['operatorId'] ?? ($accountData['address']['operatorId'] ?? 0);
             $uuid = $accountData['uuid'] ?? null;
-            $placeId = $accountData['address']['placeId'] ?? 1;
+            // The current Android client uses placeId=1 in User-Agent for API/refresh calls.
+            // Real placeId is still used in URL parameters where needed.
+            $placeId = 1;
             $refreshToken = $accountData['data']['refreshToken'] ?? null;
 
             $promises[$account] = $this->client->get(
@@ -523,7 +525,9 @@ class Domru
             $operatorId = $this->registry->accounts[$account]['data']['operatorId']
                 ?? ($this->registry->accounts[$account]['address']['operatorId'] ?? 0);
             $uuid = $this->registry->accounts[$account]['uuid'] ?? null;
-            $placeId = $this->registry->accounts[$account]['address']['placeId'] ?? 1;
+            // For list endpoints the official Android-like implementation passes placeId=1
+            // in the User-Agent, not the subscriber's real placeId.
+            $placeId = 1;
 
             $promises[$account] = $this->client->get(
                 $apiUrl,
@@ -540,21 +544,48 @@ class Domru
                 function (ResponseInterface $response) use ($account, $storageKey) {
                     $content = $response->getBody()->getContents();
                     $data = json_decode($content, true);
-                    $this->logger->debug('['.$account.'] Fetching success: '.$storageKey);
+                    $this->logger->debug('['.$account.'] Fetching success: '.$storageKey, [
+                        'httpStatus' => $response->getStatusCode(),
+                        'contentType' => $response->getHeaderLine('Content-Type'),
+                        'contentEncoding' => $response->getHeaderLine('Content-Encoding'),
+                        'contentPrefix' => mb_substr($content, 0, 500),
+                    ]);
 
                     if (!is_array($data)) {
                         $this->logger->warning('['.$account.'] Fetching '.$storageKey.' returned non-json response', [
-                            'content' => $content,
+                            'contentType' => $response->getHeaderLine('Content-Type'),
+                            'contentEncoding' => $response->getHeaderLine('Content-Encoding'),
+                            'contentPrefix' => mb_substr($content, 0, 500),
                         ]);
-                        return resolve([]);
+                        return resolve(['__domru_error' => 'non-json response']);
                     }
 
                     return resolve($data);
                 },
-                function (ResponseException $e) use ($account) {
-                    $this->apiError($account, $e);
+                function ($e) use ($account, $storageKey) {
+                    if ($e instanceof ResponseException) {
+                        $this->apiError($account, $e);
 
-                    return resolve(false);
+                        $response = $e->getResponse();
+                        $content = '';
+                        try {
+                            $content = $response->getBody()->getContents();
+                        } catch (\Throwable $ignored) {
+                        }
+
+                        return resolve([
+                            '__domru_error' => $e->getMessage(),
+                            '__http_status' => $response->getStatusCode(),
+                            '__content' => mb_substr($content, 0, 1000),
+                        ]);
+                    }
+
+                    $message = $e instanceof \Throwable ? $e->getMessage() : print_r($e, true);
+                    $this->logger->error('['.$account.'] Fetching '.$storageKey.' failed: '.$message);
+
+                    return resolve([
+                        '__domru_error' => $message,
+                    ]);
                 }
             );
         }
@@ -562,12 +593,22 @@ class Domru
         return all($promises)->then(
             function (array $refreshedAccountsTokens) use ($storageKey) {
                 foreach ($refreshedAccountsTokens as $account => $data) {
-                    if ($data) {
-                        if (isset($data['data'])) {
-                            $this->registry->update($storageKey, $account, $data['data']);
-                        } else {
-                            $this->registry->update($storageKey, $account, $data);
-                        }
+                    if (!is_array($data)) {
+                        $data = [];
+                    }
+
+                    if (isset($data['__domru_error'])) {
+                        $this->registry->update('apiErrors', $account, [
+                            $storageKey => $data,
+                        ]);
+                        $this->registry->update($storageKey, $account, []);
+                        continue;
+                    }
+
+                    if (isset($data['data']) && is_array($data['data'])) {
+                        $this->registry->update($storageKey, $account, $data['data']);
+                    } else {
+                        $this->registry->update($storageKey, $account, $data);
                     }
                 }
             }

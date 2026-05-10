@@ -4,66 +4,75 @@ namespace App\Service;
 
 use React\EventLoop\LoopInterface;
 
-/**
- * @property $state     int
- * @property $accounts  array
- * @property $haNetwork array
- * @property $loop      LoopInterface
- */
 class AsyncRegistry
 {
-    const STATE_START = 0;
-    const STATE_READY = 1;
-    const STATE_LOOP = 2;
+    public const STATE_START = 0;
+    public const STATE_READY = 1;
+    public const STATE_LOOP = 2;
 
     private static ?self $instance = null;
 
-    private array $data;
-
-    private array $tokens;
-
-    private array $fetchData;
+    public LoopInterface $loop;
+    public int $state = self::STATE_START;
+    private array $data = [];
+    private array $fetchData = [];
+    private array $tokens = [];
 
     public static function getInstance(): self
     {
-        if (self::$instance === null) {
+        if (!self::$instance) {
             self::$instance = new self();
         }
 
         return self::$instance;
     }
 
-    private function __construct()
+    public function __construct()
     {
         $this->data = [];
+        $this->fetchData = [];
         $this->tokens = [];
-
         $this->state = self::STATE_START;
     }
 
     public function all(): array
     {
         $data = $this->data;
+
+        if (!isset($data['accounts']) || !is_array($data['accounts'])) {
+            $data['accounts'] = [];
+        }
+
         foreach ($data['accounts'] as $account => &$accountData) {
             $cameras = [];
-            foreach ($this->fetch('cameras', $account) as $camera) {
-                $cameras[$camera['ID']] = $camera;
+
+            foreach ($this->fetch('cameras', (string)$account) as $camera) {
+                if (isset($camera['ID'])) {
+                    $cameras[$camera['ID']] = $camera;
+                }
             }
-            $subscriberPlaces = $this->fetch('subscriberPlaces', $account);
+
+            $subscriberPlaces = $this->fetch('subscriberPlaces', (string)$account);
 
             if ($subscriberPlaces) {
                 foreach ($subscriberPlaces as &$subscriberPlace) {
-                    foreach ($subscriberPlace['place']['accessControls'] as &$accessControl) {
+                    $accessControls = $subscriberPlace['place']['accessControls'] ?? [];
+                    if (!is_array($accessControls)) {
+                        continue;
+                    }
+
+                    foreach ($accessControls as &$accessControl) {
                         foreach ($cameras as &$cameraToWork) {
-                            foreach ($cameraToWork['ParentGroups'] as $parentGroup) {
-                                if ($parentGroup['ID'] === (int)$accessControl['forpostGroupId']) {
-                                    $accessControl['cameraId'] = $cameraToWork['ID'];
-                                    $cameraToWork['isSubscriber'] = $accessControl['id'];
-                                }
+                            $parentGroups = $cameraToWork['ParentGroups'] ?? [];
+                            if (!is_array($parentGroups)) {
+                                continue;
                             }
 
-                            if (!isset($cameraToWork['isSubscriber'])) {
-                                $subscriberPlace['additionalCameras'][] = $cameraToWork['ID'];
+                            foreach ($parentGroups as $parentGroup) {
+                                if (($parentGroup['ID'] ?? null) === (int)($accessControl['forpostGroupId'] ?? 0)) {
+                                    $accessControl['cameraId'] = $cameraToWork['ID'];
+                                    $cameraToWork['isSubscriber'] = $accessControl['id'] ?? true;
+                                }
                             }
                         }
                     }
@@ -72,22 +81,23 @@ class AsyncRegistry
                 foreach ($subscriberPlaces as &$subscriberPlace) {
                     $subscriberPlace['additionalCameras'] = false;
                     foreach ($cameras as $camera) {
-                        if (!isset($camera['isSubscriber'])) {
+                        if (!isset($camera['isSubscriber']) && isset($camera['ID'])) {
                             $subscriberPlace['additionalCameras'][] = $camera['ID'];
                         }
                     }
-
                     if (is_array($subscriberPlace['additionalCameras'])) {
                         $subscriberPlace['additionalCameras'] = array_unique($subscriberPlace['additionalCameras']);
                     }
                 }
             }
 
-            $accountData['finances'] = $this->fetch('finances', $account);
-            $accountData['profiles'] = $this->fetch('profiles', $account);
+            $accountData['finances'] = $this->fetch('finances', (string)$account);
+            $accountData['profiles'] = $this->fetch('profiles', (string)$account);
             $accountData['cameras'] = $cameras;
             $accountData['subscriberPlaces'] = $subscriberPlaces;
+            $accountData['apiErrors'] = $this->fetch('apiErrors', (string)$account);
         }
+        unset($accountData);
 
         unset($data['loop']);
 
@@ -129,12 +139,18 @@ class AsyncRegistry
     public function update(string $key, string $account, array $data)
     {
         $this->data['lastUpdate'][$account][$key] = time();
+
+        if ($key === 'apiErrors' && isset($this->fetchData[$account][$key]) && is_array($this->fetchData[$account][$key])) {
+            $this->fetchData[$account][$key] = array_merge($this->fetchData[$account][$key], $data);
+            return;
+        }
+
         $this->fetchData[$account][$key] = $data;
     }
 
-    public function fetch(string $key, string $account): ?array
+    public function fetch(string $key, string $account): array
     {
-        return $this->fetchData[$account][$key] ?? null;
+        return $this->fetchData[$account][$key] ?? [];
     }
 
     public function setToken(string $account, string $token)
