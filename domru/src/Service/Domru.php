@@ -46,6 +46,7 @@ class Domru
     public const API_FINANCES = 'https://myhome.proptech.ru/rest/v1/subscribers/profiles/finances';
     public const API_CAMERAS = 'https://myhome.proptech.ru/rest/v1/forpost/cameras';
     public const API_SUBSCRIBER_PLACES = 'https://myhome.proptech.ru/rest/v1/subscriberplaces';
+    public const API_ACCESS_CONTROLS = 'https://myhome.proptech.ru/rest/v1/places/%d/accesscontrols';
 
     public const API_OPEN_DOOR = 'https://myhome.proptech.ru/rest/v1/places/%d/accesscontrols/%d/actions';
     public const API_CAMERA_GET_STREAM = 'https://myhome.proptech.ru/rest/v1/forpost/cameras/%d/video?';
@@ -267,6 +268,7 @@ class Domru
                                     $promises[] = $this->fetchData(self::API_FINANCES, 'finances', $account);
                                     $promises[] = $this->fetchData(self::API_PROFILES, 'profiles', $account);
                                     $promises[] = $this->fetchData(self::API_CAMERAS, 'cameras', $account);
+                                    $promises[] = $this->fetchData(self::API_ACCESS_CONTROLS, 'accessControls', $account);
                                 }
 
                                 if (!$promises) {
@@ -377,6 +379,15 @@ class Domru
                     $this->registry->loop->addPeriodicTimer(
                         self::REFRESH_SUBSCRIBER_PLACES_INTERVAL,
                         fn() => $this->fetchData(self::API_SUBSCRIBER_PLACES, 'subscriberPlaces')
+                    );
+                }
+            ),
+            $this->fetchData(self::API_ACCESS_CONTROLS, 'accessControls')->then(
+                function () {
+                    $this->logger->debug('Watchdog for accessControls complete');
+                    $this->registry->loop->addPeriodicTimer(
+                        self::REFRESH_CAMERAS_INTERVAL,
+                        fn() => $this->fetchData(self::API_ACCESS_CONTROLS, 'accessControls')
                     );
                 }
             ),
@@ -535,9 +546,16 @@ class Domru
             // For list endpoints the official Android-like implementation passes placeId=1
             // in the User-Agent, not the subscriber's real placeId.
             $placeId = 1;
+            $uri = $apiUrl;
+            if (strpos($apiUrl, '%d') !== false) {
+                $uri = sprintf(
+                    $apiUrl,
+                    $this->registry->accounts[$account]['address']['placeId'] ?? $placeId
+                );
+            }
 
             $promises[$account] = $this->client->get(
-                $apiUrl,
+                $uri,
                 $this->commonHeaders(
                     $operatorId,
                     $uuid,
@@ -620,37 +638,35 @@ class Domru
         );
     }
 
-    private function getPlaceIdAccessControlId(string $account, int $cameraId): PromiseInterface
+    private function getPlaceIdAccessControlId(string $account, int $accessControlId): PromiseInterface
     {
         $all = $this->registry->all();
         $accountData = $all['accounts'][$account];
-        $subscriberPlaces = $accountData['subscriberPlaces'] ?? null;
+        $accessControls = $accountData['accessControls'] ?? null;
 
-        if (!is_array($subscriberPlaces)) {
-            return reject('Subscriber places is empty');
+        if (!is_array($accessControls)) {
+            return reject('Access controls is empty');
         }
 
-        $useAccessControl = $placeId = $accessControlId = null;
+        $useAccessControl = null;
 
-        foreach ($subscriberPlaces as $subscriberPlace) {
-            foreach ($subscriberPlace['place']['accessControls'] as $accessControl) {
-                if (isset($accessControl['cameraId']) && $accessControl['cameraId'] === $cameraId) {
-                    $placeId = $subscriberPlace['place']['id'];
-                    $accessControlId = $accessControl['id'];
-                    $useAccessControl = $subscriberPlace['place'];
-                    break 2;
-                }
+        foreach ($accessControls as $accessControl) {
+            if (($accessControl['id'] ?? null) === $accessControlId) {
+                $useAccessControl = $accessControl;
+                break;
             }
         }
 
-        if (!$placeId || !$accessControlId || !$useAccessControl) {
+        $placeId = $useAccessControl['placeId']
+            ?? ($accountData['subscriberPlaces'][0]['place']['id'] ?? null);
+
+        if (!$placeId || !$useAccessControl) {
             return reject('Wrong parameters');
         }
 
         return resolve(
             [
                 'placeId' => $placeId,
-                'accessControlId' => $accessControlId,
                 'accessControl' => $useAccessControl,
             ]
         );
@@ -691,13 +707,13 @@ class Domru
         );
     }
 
-    public function openDoor(string $account, int $cameraId): PromiseInterface
+    public function openDoor(string $account, int $accessControlId): PromiseInterface
     {
         if ($this->registry->state !== AsyncRegistry::STATE_LOOP) {
             return reject('Api not ready');
         }
 
-        return $this->getPlaceIdAccessControlId($account, $cameraId)
+        return $this->getPlaceIdAccessControlId($account, $accessControlId)
             ->then(
                 function ($use) use ($account) {
                     if ($use['accessControl']['allowOpen'] === false) {
@@ -706,7 +722,7 @@ class Domru
 
                     $this->logger->debug(
                         'Trying to open door for place',
-                        ['placeId' => $use['placeId'], 'accessControlId' => $use['accessControlId']]
+                        ['placeId' => $use['placeId'], 'accessControlId' => $use['accessControl']['id']]
                     );
 
                     $operatorId = $this->registry->accounts[$account]['data']['operatorId']
@@ -715,7 +731,7 @@ class Domru
                     $placeId = $this->registry->accounts[$account]['address']['placeId'] ?? 1;
 
                     return $this->client->post(
-                        sprintf(self::API_OPEN_DOOR, $use['placeId'], $use['accessControlId']),
+                        sprintf(self::API_OPEN_DOOR, $use['placeId'], $use['accessControl']['id']),
                         $this->commonHeaders(
                             $operatorId,
                             $uuid,
@@ -763,21 +779,25 @@ class Domru
             return reject('Api not ready');
         }
 
-        $cameras = $this->registry->fetch('cameras', $account);
+        $accessControls = $this->registry->fetch('accessControls', $account);
 
-        if (!count($cameras) || !isset($cameras[0]['ID'])) {
-            return reject('There is no available camera for streaming');
+        if (!count($accessControls)) {
+            return reject('There is no available access control for snapshot');
         }
 
-        foreach ($cameras as $camera) {
-            if ($cameraId && (int)$camera['ID'] === $cameraId) {
+        foreach ($accessControls as $accessControl) {
+            if ($cameraId && (int) ($accessControl['externalCameraId'] ?? 0) === $cameraId) {
                 break;
             }
 
             if ($cameraId === null) {
-                $cameraId = (int)$camera['ID'];
+                $cameraId = (int) ($accessControl['externalCameraId'] ?? 0);
                 break;
             }
+        }
+
+        if (!$cameraId) {
+            return reject('There is no available camera for snapshot');
         }
 
         $operatorId = $this->registry->accounts[$account]['data']['operatorId']
@@ -831,25 +851,29 @@ class Domru
             return reject('Api not ready');
         }
 
-        $cameras = $this->registry->fetch('cameras', $account);
+        $accessControls = $this->registry->fetch('accessControls', $account);
 
-        if (!count($cameras) || !isset($cameras[0]['ID'])) {
-            return reject('There is no available camera for streaming');
+        if (!count($accessControls)) {
+            return reject('There is no available access control for streaming');
         }
 
-        $cameraToUse = null;
+        $accessControlToUse = null;
 
-        foreach ($cameras as $camera) {
-            if ($cameraId && (int)$camera['ID'] === $cameraId) {
-                $cameraToUse = $camera;
+        foreach ($accessControls as $accessControl) {
+            if ($cameraId && (int) ($accessControl['externalCameraId'] ?? 0) === $cameraId) {
+                $accessControlToUse = $accessControl;
                 break;
             }
 
             if ($cameraId === null) {
-                $cameraId = (int)$camera['ID'];
-                $cameraToUse = $camera;
+                $cameraId = (int) ($accessControl['externalCameraId'] ?? 0);
+                $accessControlToUse = $accessControl;
                 break;
             }
+        }
+
+        if (!$cameraId || !$accessControlToUse) {
+            return reject('There is no available camera for streaming');
         }
 
         $url = sprintf(self::API_CAMERA_GET_STREAM, $cameraId);
@@ -859,7 +883,7 @@ class Domru
 
         if ($timestamp) {
             $httpQuery['TS'] = $timestamp;
-            $httpQuery['TZ'] = $cameraToUse['TimeZone'];
+            $httpQuery['TZ'] = $accessControlToUse['timeZone'] ?? null;
         }
 
         $operatorId = $this->registry->accounts[$account]['data']['operatorId']

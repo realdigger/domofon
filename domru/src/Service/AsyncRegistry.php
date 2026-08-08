@@ -53,35 +53,15 @@ class AsyncRegistry
             }
 
             $subscriberPlaces = $this->fetch('subscriberPlaces', (string)$account);
+            $accessControls = $this->fetch('accessControls', (string)$account);
 
             if ($subscriberPlaces) {
-                $cameraGroups = [];
-                foreach ($cameras as $camera) {
-                    foreach ($camera['ParentGroups'] ?? [] as $parentGroup) {
-                        if (isset($parentGroup['ID'])) {
-                            $cameraGroups[(string) $parentGroup['ID']] = $camera['ID'];
-                        }
+                foreach ($accessControls as $accessControl) {
+                    $cameraId = $accessControl['externalCameraId'] ?? null;
+                    if ($cameraId && isset($cameras[$cameraId])) {
+                        $cameras[$cameraId]['isSubscriber'] = $accessControl['id'] ?? true;
                     }
                 }
-
-                foreach ($subscriberPlaces as &$subscriberPlace) {
-                    $accessControls = $subscriberPlace['place']['accessControls'] ?? [];
-                    if (!is_array($accessControls)) {
-                        continue;
-                    }
-
-                    foreach ($accessControls as &$accessControl) {
-                        $groupId = (string) ($accessControl['forpostGroupId'] ?? '');
-                        if (isset($cameraGroups[$groupId])) {
-                            $cameraId = $cameraGroups[$groupId];
-                            $accessControl['cameraId'] = $cameraId;
-                            $cameras[$cameraId]['isSubscriber'] = $accessControl['id'] ?? true;
-                        }
-                    }
-                    unset($accessControl);
-                    $subscriberPlace['place']['accessControls'] = $accessControls;
-                }
-                unset($subscriberPlace);
 
                 foreach ($subscriberPlaces as &$subscriberPlace) {
                     $subscriberPlace['additionalCameras'] = false;
@@ -99,6 +79,7 @@ class AsyncRegistry
             $accountData['finances'] = $this->fetch('finances', (string)$account);
             $accountData['profiles'] = $this->fetch('profiles', (string)$account);
             $accountData['cameras'] = $cameras;
+            $accountData['accessControls'] = $accessControls;
             $accountData['subscriberPlaces'] = $subscriberPlaces;
             $accountData['apiErrors'] = $this->fetch('apiErrors', (string)$account);
         }

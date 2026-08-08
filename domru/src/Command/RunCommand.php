@@ -244,10 +244,10 @@ class RunCommand extends Command
                                 $events = [];
                             }
 
-                            $subscriberPlaces = $accountData['subscriberPlaces'] ?? [];
+                            $accessControls = $accountData['accessControls'] ?? [];
 
-                            if (!is_array($subscriberPlaces)) {
-                                $subscriberPlaces = [];
+                            if (!is_array($accessControls)) {
+                                $accessControls = [];
                             }
 
                             foreach ($events as &$event) {
@@ -255,24 +255,10 @@ class RunCommand extends Command
                                     continue;
                                 }
 
-                                foreach ($subscriberPlaces as $subscriberPlace) {
-                                    $place = $subscriberPlace['place'] ?? [];
-
-                                    if (($place['id'] ?? null) !== ($event['placeId'] ?? null)) {
-                                        continue;
-                                    }
-
-                                    $accessControls = $place['accessControls'] ?? [];
-
-                                    if (!is_array($accessControls)) {
-                                        continue;
-                                    }
-
-                                    foreach ($accessControls as $accessControl) {
-                                        if (($accessControl['id'] ?? null) === ($event['source']['id'] ?? null)) {
-                                            if (isset($accessControl['cameraId'])) {
-                                                $event['cameraId'] = $accessControl['cameraId'];
-                                            }
+                                foreach ($accessControls as $accessControl) {
+                                    if (($accessControl['id'] ?? null) === ($event['source']['id'] ?? null)) {
+                                        if (isset($accessControl['externalCameraId'])) {
+                                            $event['cameraId'] = $accessControl['externalCameraId'];
                                         }
                                     }
                                 }
