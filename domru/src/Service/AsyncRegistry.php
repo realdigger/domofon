@@ -55,6 +55,15 @@ class AsyncRegistry
             $subscriberPlaces = $this->fetch('subscriberPlaces', (string)$account);
 
             if ($subscriberPlaces) {
+                $cameraGroups = [];
+                foreach ($cameras as $camera) {
+                    foreach ($camera['ParentGroups'] ?? [] as $parentGroup) {
+                        if (isset($parentGroup['ID'])) {
+                            $cameraGroups[(string) $parentGroup['ID']] = $camera['ID'];
+                        }
+                    }
+                }
+
                 foreach ($subscriberPlaces as &$subscriberPlace) {
                     $accessControls = $subscriberPlace['place']['accessControls'] ?? [];
                     if (!is_array($accessControls)) {
@@ -62,21 +71,17 @@ class AsyncRegistry
                     }
 
                     foreach ($accessControls as &$accessControl) {
-                        foreach ($cameras as &$cameraToWork) {
-                            $parentGroups = $cameraToWork['ParentGroups'] ?? [];
-                            if (!is_array($parentGroups)) {
-                                continue;
-                            }
-
-                            foreach ($parentGroups as $parentGroup) {
-                                if (($parentGroup['ID'] ?? null) === (int)($accessControl['forpostGroupId'] ?? 0)) {
-                                    $accessControl['cameraId'] = $cameraToWork['ID'];
-                                    $cameraToWork['isSubscriber'] = $accessControl['id'] ?? true;
-                                }
-                            }
+                        $groupId = (string) ($accessControl['forpostGroupId'] ?? '');
+                        if (isset($cameraGroups[$groupId])) {
+                            $cameraId = $cameraGroups[$groupId];
+                            $accessControl['cameraId'] = $cameraId;
+                            $cameras[$cameraId]['isSubscriber'] = $accessControl['id'] ?? true;
                         }
                     }
+                    unset($accessControl);
+                    $subscriberPlace['place']['accessControls'] = $accessControls;
                 }
+                unset($subscriberPlace);
 
                 foreach ($subscriberPlaces as &$subscriberPlace) {
                     $subscriberPlace['additionalCameras'] = false;
@@ -104,6 +109,7 @@ class AsyncRegistry
         return array_merge(
             $data,
             [
+                'state' => $this->state,
                 'tokens' => $this->tokens,
             ]
         );

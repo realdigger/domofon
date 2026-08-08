@@ -103,6 +103,7 @@ class Domru
         if ($e instanceof ResponseException) {
             try {
                 $content = $e->getResponse()->getBody()->getContents();
+                $content = preg_replace('/(token:\\s*)\\S+/i', '$1[redacted]', $content);
             } catch (\Throwable $ignored) {
                 $content = '';
             }
@@ -435,9 +436,15 @@ class Domru
                         if (is_array($data) && !empty($data['accessToken'])) {
                             $this->logger->debug('['.$account.'] Access token refresh success');
 
+                            $accounts = $this->registry->accounts;
+                            $accounts[$account]['data']['accessToken'] = $data['accessToken'];
+
                             if (!empty($data['refreshToken'])) {
-                                $this->registry->accounts[$account]['data']['refreshToken'] = $data['refreshToken'];
+                                $accounts[$account]['data']['refreshToken'] = $data['refreshToken'];
                             }
+
+                            $this->registry->accounts = $accounts;
+                            $this->accountService->addAccount($accounts[$account]);
 
                             return resolve($data['accessToken']);
                         }
@@ -548,14 +555,12 @@ class Domru
                         'httpStatus' => $response->getStatusCode(),
                         'contentType' => $response->getHeaderLine('Content-Type'),
                         'contentEncoding' => $response->getHeaderLine('Content-Encoding'),
-                        'contentPrefix' => mb_substr($content, 0, 500),
                     ]);
 
                     if (!is_array($data)) {
                         $this->logger->warning('['.$account.'] Fetching '.$storageKey.' returned non-json response', [
                             'contentType' => $response->getHeaderLine('Content-Type'),
                             'contentEncoding' => $response->getHeaderLine('Content-Encoding'),
-                            'contentPrefix' => mb_substr($content, 0, 500),
                         ]);
                         return resolve(['__domru_error' => 'non-json response']);
                     }

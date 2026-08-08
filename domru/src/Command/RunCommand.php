@@ -279,6 +279,9 @@ class RunCommand extends Command
                             }
 
                             $accountData['events'] = $events;
+                        },
+                        function () use (&$accountData) {
+                            $accountData['events'] = [];
                         }
                     );
             }
