@@ -74,7 +74,7 @@
                                                         <h4>Видеопоток с камеры домофона</h4>
                                                         <button type="button" class="btn btn-primary btn-sm" onclick="toggleLiveVideo(this, 'live_video_{{ account.address.accountId }}_{{ accessControl.externalCameraId }}')">Смотреть онлайн</button>
                                                         <div id="live_video_{{ account.address.accountId }}_{{ accessControl.externalCameraId }}" class="d-none mt-3">
-                                                            <video class="w-100" controls muted preload="none" data-src="{{ hassioIngress }}/api/camera/stream/{{ account.address.accountId }}/{{ accessControl.externalCameraId }}">
+                                                            <video class="w-100" controls preload="none" data-src="{{ hassioIngress }}/api/camera/stream/{{ account.address.accountId }}/{{ accessControl.externalCameraId }}">
                                                                 Ваш браузер не поддерживает воспроизведение видео.
                                                             </video>
                                                             <div class="d-none text-muted mt-2 live-video-status"></div>
