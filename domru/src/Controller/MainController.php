@@ -62,6 +62,7 @@ class MainController extends AbstractController
                     'accessControlCallMissed',
                     'accessControlCallAccepted',
                 ],
+                'eventVideoSince' => time() - 3 * 24 * 60 * 60,
                 'error' => $error,
             ]
         );

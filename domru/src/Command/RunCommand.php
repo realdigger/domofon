@@ -271,18 +271,23 @@ class RunCommand extends Command
                         }
                     );
             }
+            unset($accountData);
         }
 
         return all($promises)->then(
-            fn() => $this->json(
-                array_merge(
-                    $registry,
-                    [
-                        'memoryHuman' => $this->memoryConvert($memory),
-                        'memory' => $memory,
-                    ]
-                )
-            )
+            function () use (&$registry, &$accounts, $memory) {
+                $registry['accounts'] = $accounts;
+
+                return $this->json(
+                    array_merge(
+                        $registry,
+                        [
+                            'memoryHuman' => $this->memoryConvert($memory),
+                            'memory' => $memory,
+                        ]
+                    )
+                );
+            }
         );
     }
 

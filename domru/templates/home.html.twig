@@ -37,10 +37,6 @@
                                                 <td>Номер телефона</td>
                                                 <td>{{ account.phone }}</td>
                                             </tr>
-                                            <tr>
-                                                <td>Токен доступа</td>
-                                                <td>{{ account.data.refreshToken }}</td>
-                                            </tr>
                                             {% if account.finances and account.finances.balance %}
                                                 <tr>
                                                     <td>Баланс</td>
@@ -76,6 +72,13 @@
                                                 <div class="row text-left">
                                                     <div class="col">
                                                         <h4>Видеопоток с камеры домофона</h4>
+                                                        <button type="button" class="btn btn-primary btn-sm" onclick="toggleLiveVideo(this, 'live_video_{{ account.address.accountId }}_{{ accessControl.externalCameraId }}')">Смотреть онлайн</button>
+                                                        <div id="live_video_{{ account.address.accountId }}_{{ accessControl.externalCameraId }}" class="d-none mt-3">
+                                                            <video class="w-100" controls muted preload="none" data-src="{{ hassioIngress }}/api/camera/stream/{{ account.address.accountId }}/{{ accessControl.externalCameraId }}">
+                                                                Ваш браузер не поддерживает воспроизведение видео.
+                                                            </video>
+                                                            <div class="d-none text-muted mt-2 live-video-status"></div>
+                                                        </div>
                                                         <div class="form-group">
                                                             <input type="text" class="form-control" readonly value="http://{{ hostIp }}:20880/api/camera/stream/{{ account.address.accountId }}/{{ accessControl.externalCameraId }}">
                                                         </div>
@@ -86,10 +89,12 @@
 
                                             <div class="text-center">
                                                 <div class="btn-group" role="group">
+                                                    {% if account.events|length > 5 %}
                                                     <button class="btn btn-sm btn-primary"
                                                             onclick="toggleEvents(this, '{{ account.address.accountId }}')">
                                                         Показать все события
                                                     </button>
+                                                    {% endif %}
                                                     <button class="btn btn-sm btn-info"
                                                             onclick="toggleHomeAssistant(this, '{{ place.place.id }}')">
                                                         Показать интеграцию в Home Assistant
@@ -102,6 +107,50 @@
                                                     </form>
                                                 </div>
                                             </div>
+
+                                            {% if account.events %}
+                                                <div class="row text-left mt-5">
+                                                    <div class="col">
+                                                        <h4>Последние события</h4>
+                                                        <div id="events_{{ account.address.accountId }}">
+                                                            {% for i, event in account.events %}
+                                                                {% set eventHasRecording = event.eventTypeName in validEvents and event.cameraId and event.timestamp >= eventVideoSince %}
+                                                                <div class="card{% if i >= 5 %} d-none hidden-events{% endif %}" data-accountId="{{ account.address.accountId }}">
+                                                                    <div id="header_event_{{ event.id }}">
+                                                                        <div class="row mb-0"{% if eventHasRecording %} data-toggle="collapse" data-target="#content_event_{{ event.id }}" aria-expanded="true" aria-controls="content_event_{{ event.id }}"{% endif %}>
+                                                                            <div class="col-8">
+                                                                                <button class="btn btn-link {% if event.eventTypeName in validEvents %}{% if event.eventTypeName == 'accessControlCallMissed' %}text-danger{% else %}text-info{% endif %}{% else %}text-secondary{% endif %}">
+                                                                                    {{ event.message }}
+                                                                                </button>
+                                                                            </div>
+                                                                            <div class="col-4 text-right">
+                                                                                <button class="btn btn-link text-muted">
+                                                                                    {{ event.timestamp|format_datetime('short', 'short', locale='ru') }}
+                                                                                </button>
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+
+                                                                    {% if eventHasRecording %}
+                                                                    <div id="content_event_{{ event.id }}" class="collapse{% if i == 0 %} show{% endif %}" aria-labelledby="header_event_{{ event.id }}" data-parent="#events_{{ account.address.accountId }}">
+                                                                        <div class="card-body">
+                                                                            <button type="button" class="btn btn-primary btn-sm" onclick="toggleEventVideo(this, 'event_video_{{ event.id }}')">Смотреть запись</button>
+                                                                            <div id="event_video_{{ event.id }}" class="d-none mt-3">
+                                                                                <video class="w-100" controls preload="metadata" data-src="{{ hassioIngress }}/api/camera/stream/{{ account.address.accountId }}/{{ event.cameraId }}/{{ event.timestamp }}">
+                                                                                    Ваш браузер не поддерживает воспроизведение видео.
+                                                                                </video>
+                                                                                <div class="d-none text-muted mt-2 event-video-status"></div>
+                                                                                <a class="d-inline-block mt-2" href="{{ hassioIngress }}/api/camera/stream/{{ account.address.accountId }}/{{ event.cameraId }}/{{ event.timestamp }}" target="_blank" rel="noopener">Открыть запись в новой вкладке</a>
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                    {% endif %}
+                                                                </div>
+                                                            {% endfor %}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            {% endif %}
 
                                             {% if place.additionalCameras and account.cameras|length > 1 %}
                                                 <div class="row text-left mt-5">
@@ -119,44 +168,6 @@
                                                             </figure>
                                                         </div>
                                                     {% endfor %}
-                                                </div>
-                                            {% endif %}
-
-                                            {% if account.events %}
-                                                <div class="row text-left mt-5">
-                                                    <div class="col">
-                                                        <h4>Последние события</h4>
-                                                        <div id="events_{{ account.address.accountId }}">
-                                                            {% for i, event in account.events %}
-                                                                <div class="card{% if i >= 5 %} d-none hidden-events{% endif %}" data-accountId="{{ account.address.accountId }}">
-                                                                    <div id="header_event_{{ event.id }}">
-                                                                        <div class="row mb-0" data-toggle="collapse" data-target="#content_event_{{ event.id }}" aria-expanded="true" aria-controls="content_event_{{ event.id }}">
-                                                                            <div class="col-8">
-                                                                                <button class="btn btn-link {% if event.eventTypeName in validEvents %}{% if event.eventTypeName == 'accessControlCallMissed' %}text-danger{% else %}text-info{% endif %}{% else %}text-secondary{% endif %}">
-                                                                                    {{ event.message }}
-                                                                                </button>
-                                                                            </div>
-                                                                            <div class="col-4 text-right">
-                                                                                <button class="btn btn-link text-muted">
-                                                                                    {{ event.timestamp|format_datetime('short', 'short', locale='ru') }}
-                                                                                </button>
-                                                                            </div>
-                                                                        </div>
-                                                                    </div>
-
-                                                                    {% if event.eventTypeName in validEvents %}
-                                                                    <div id="content_event_{{ event.id }}" class="collapse{% if i == 0 %} show{% endif %}" aria-labelledby="header_event_{{ event.id }}" data-parent="#events_{{ account.address.accountId }}">
-                                                                        <div class="card-body">
-                                                                            <div class="form-group">
-                                                                                <input type="text" class="form-control" readonly value="http://{{ hostIp }}:20880/api/camera/stream/{{ account.address.accountId }}/{{ event.cameraId }}/{{ event.timestamp }}">
-                                                                            </div>
-                                                                        </div>
-                                                                    </div>
-                                                                    {% endif %}
-                                                                </div>
-                                                            {% endfor %}
-                                                        </div>
-                                                    </div>
                                                 </div>
                                             {% endif %}
 
@@ -249,6 +260,7 @@ script:
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.js"></script>
     <script>
 	    $(document).ready(function () {
             $('.figure-img').each(function (i, el) {
@@ -287,6 +299,76 @@ script:
                 s.text('Показать последние 5 событий');
             } else {
 	            s.text('Показать все события');
+            }
+
+			container.toggleClass('d-none');
+        }
+
+		function toggleEventVideo(self, videoId) {
+            var container = $('#' + videoId),
+                video = container.find('video').get(0),
+                player = $(video).data('mpegts-player');
+
+            if (container.hasClass('d-none')) {
+                if (!window.mpegts || !mpegts.isSupported()) {
+                    container.find('.event-video-status').text('Встроенное воспроизведение не поддерживается этим браузером.').removeClass('d-none');
+                } else if (!player) {
+                    player = mpegts.createPlayer({
+                        type: 'mpegts',
+                        isLive: false,
+                        url: video.dataset.src
+                    });
+                    player.on(mpegts.Events.ERROR, function () {
+                        container.find('.event-video-status').text('Не удалось воспроизвести запись во встроенном плеере.').removeClass('d-none');
+                    });
+                    player.attachMediaElement(video);
+                    player.load();
+                    player.play();
+                    $(video).data('mpegts-player', player);
+                }
+
+                $(self).text('Скрыть запись');
+            } else {
+                if (player) {
+                    player.destroy();
+                    $(video).removeData('mpegts-player');
+                }
+                $(self).text('Смотреть запись');
+            }
+
+			container.toggleClass('d-none');
+        }
+
+		function toggleLiveVideo(self, videoId) {
+            var container = $('#' + videoId),
+                video = container.find('video').get(0),
+                player = $(video).data('mpegts-player');
+
+            if (container.hasClass('d-none')) {
+                if (!window.mpegts || !mpegts.isSupported()) {
+                    container.find('.live-video-status').text('Встроенное воспроизведение не поддерживается этим браузером.').removeClass('d-none');
+                } else if (!player) {
+                    player = mpegts.createPlayer({
+                        type: 'mpegts',
+                        isLive: true,
+                        url: video.dataset.src
+                    });
+                    player.on(mpegts.Events.ERROR, function () {
+                        container.find('.live-video-status').text('Не удалось воспроизвести онлайн-поток.').removeClass('d-none');
+                    });
+                    player.attachMediaElement(video);
+                    player.load();
+                    player.play();
+                    $(video).data('mpegts-player', player);
+                }
+
+                $(self).text('Скрыть онлайн-поток');
+            } else {
+                if (player) {
+                    player.destroy();
+                    $(video).removeData('mpegts-player');
+                }
+                $(self).text('Смотреть онлайн');
             }
 
 			container.toggleClass('d-none');
