@@ -872,7 +872,17 @@ class Domru
             }
         }
 
-        if (!$cameraId || !$accessControlToUse) {
+        $additionalCameraAvailable = false;
+        if ($cameraId && !$accessControlToUse && $timestamp === null) {
+            foreach ($this->registry->fetch('cameras', $account) as $camera) {
+                if ((int) ($camera['ID'] ?? 0) === $cameraId) {
+                    $additionalCameraAvailable = true;
+                    break;
+                }
+            }
+        }
+
+        if (!$cameraId || (!$accessControlToUse && !$additionalCameraAvailable)) {
             return reject('There is no available camera for streaming');
         }
 
